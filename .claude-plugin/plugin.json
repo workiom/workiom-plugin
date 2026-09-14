@@ -1,0 +1,18 @@
+{
+  "name": "workiom-plugin",
+  "version": "1.1.0",
+  "description": "Build and publish Workiom vibe apps — self-contained pages that run inside a Workiom workspace and read and write its lists using the viewer's own session.",
+  "author": {
+    "name": "Workiom",
+    "url": "https://workiom.com"
+  },
+  "homepage": "https://workiom.com",
+  "repository": "https://github.com/workiom/workiom-plugin",
+  "license": "MIT",
+  "keywords": [
+    "workiom",
+    "vibe",
+    "no-code",
+    "internal-tools"
+  ]
+}

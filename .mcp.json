@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "workiom": {
+      "type": "http",
+      "url": "https://mcp.workiom.com/mcp"
+    }
+  }
+}
