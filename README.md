@@ -1,5 +1,7 @@
 # Workiom Vibe Apps
 
+*Installed as `workiom-plugin`.*
+
 Describe the internal page you need — a form, a tracker, a small tool — and get
 a working app inside your Workiom workspace, reading and writing your real
 lists.
@@ -12,16 +14,16 @@ This plugin bundles two things that only work together:
 
 ## Install
 
-```
-/plugin install workiom-plugin@claude-community
-```
-
-Or from Workiom's own marketplace:
+From Workiom's marketplace:
 
 ```
 /plugin marketplace add workiom/workiom-claude-plugins
 /plugin install workiom-vibe-apps@workiom
 ```
+
+A listing in the Claude community directory is pending review. Once it lands,
+`/plugin install workiom-plugin@claude-community` works without adding a
+marketplace first.
 
 Installing the plugin brings both parts. Sign in to the Workiom connector with
 your Workiom account the first time you use it.
@@ -87,3 +89,7 @@ skills/workiom-vibe-apps/
 ## Support
 
 Issues and questions: <https://workiom.com>
+
+## License
+
+MIT — see [LICENSE](LICENSE).
