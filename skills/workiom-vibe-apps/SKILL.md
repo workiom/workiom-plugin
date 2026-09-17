@@ -224,16 +224,20 @@ that make it actually work under the platform's constraints:
 ### Platform constraints (violations = broken page, not rejected upload)
 
 - **No external resources.** The serving CSP is `default-src 'none'` with
-  inline script/style and same-origin connects only, plus
-  `https://api.workiom.com`. No CDNs, no Google Fonts, no analytics, no remote
-  images. System font stacks; inline SVG or emoji for icons; hand-rolled JS.
-- **`https://api.workiom.com` is allowed for `fetch`/XHR only, not `<img>`.**
-  The CSP grants it under `connect-src`; `img-src` stays at the `default-src
+  inline script/style and same-origin connects only, plus Workiom's own API
+  hosts. No CDNs, no Google Fonts, no analytics, no remote images. System font
+  stacks; inline SVG or emoji for icons; hand-rolled JS.
+- **Workiom's API hosts are allowed for `fetch`/XHR only, not `<img>`.**
+  The CSP grants them under `connect-src`; `img-src` stays at the `default-src
   'none'` default. A direct `<img src="https://api.workiom.com/...">` is
   silently blocked before it reaches the network (confirmed via DevTools —
   zero bytes transferred, no error surfaced to JS). For file thumbnails and
   downloads, fetch the bytes with `workiomHeaders()` and use a blob URL — see
   "File attachments" below.
+- **The API host is not always `api.workiom.com`.** A workspace can be served
+  by its own shard, and only that shard holds its data. The host is resolved at
+  runtime — see "Calling the API". Hardcoding one is the same class of mistake
+  as hardcoding a tenant id.
 - **Relative asset paths only.** `src="assets/x.jpg"` — never a leading `/`
   (resolves outside the app and 404s), never `/vibe/{appId}/…` (breaks on
   rename), never a `<base>` tag (CSP `base-uri 'none'` ignores it).
@@ -251,10 +255,12 @@ page JS. Use exactly:
 
 ```js
 function getCookie(name) {
-  const m = document.cookie.match(
-    new RegExp("(?:^|; )" + name.replace(/([.$?*|{}()[\]\\/+^])/g, "\\$1") + "=([^;]*)")
-  );
-  return m ? decodeURIComponent(m[1]) : null;
+  for (const part of document.cookie.split("; ")) {
+    const i = part.indexOf("=");
+    if (i > -1 && part.slice(0, i) === name)
+      return decodeURIComponent(part.slice(i + 1));
+  }
+  return null;
 }
 
 function workiomHeaders() {
@@ -275,7 +281,8 @@ function workiomHeaders() {
 
 Hard rules:
 
-1. Never hardcode a token, API key, or tenant id — cookies are the only source.
+1. Never hardcode a token, API key, tenant id, or API host — cookies are the
+   only source for the first three, and `apiBase()` for the last.
 2. The token appears **nowhere** except the `Authorization` header: not in
    `console.log`, not in the DOM, not in errors, not in debug panels (show
    response bodies, never request headers).
@@ -316,7 +323,67 @@ Three details that matter:
 
 ### Calling the API
 
-Base: `https://api.workiom.com` (the only permitted external origin). All calls use `workiomHeaders()`.
+**Resolve the base first — never hardcode it.** A workspace can be served by
+its own API host (a shard), and that host is the only one holding its lists;
+calling the wrong one fails with "not found" errors that look like a bad
+`listId`. The page finds its own host from its own hostname, using an
+anonymous endpoint on the central host. Every generated app includes this
+verbatim:
+
+```js
+let apiBasePromise = null;
+
+function apiBase() {
+  if (apiBasePromise) return apiBasePromise;
+
+  // A workspace on *.workiom.com is identified by its subdomain; one on its
+  // own domain, by the origin. The backend prefers tenancyName when both are
+  // sent, so send exactly one.
+  const host = location.hostname.toLowerCase();
+  const body = host.endsWith(".workiom.com")
+    ? { tenancyName: host.split(".")[0] }
+    : { customDomain: location.origin };
+
+  apiBasePromise = fetch("https://api.workiom.com/api/services/app/Account/IsTenantAvailable", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  })
+    .then(r => r.json())
+    .then(j => {
+      // apiUrl is set only for a workspace on its own shard; serverRootAddress
+      // names the host serving everyone else. Both come from Workiom, so
+      // neither is a guess.
+      const base = j?.result?.apiUrl || j?.result?.serverRootAddress;
+      if (!base) throw new Error("Workiom did not report an API host for this workspace.");
+      return base;
+    })
+    .catch(err => {
+      apiBasePromise = null;   // a cached rejection would make any Retry fail instantly
+      throw err;
+    });
+
+  return apiBasePromise;
+}
+```
+
+Three rules about it:
+
+- **Never fall back to `https://api.workiom.com` when the lookup fails.** For a
+  sharded workspace that host is the wrong server; calling it anyway turns a
+  clear failure into a page that appears to work and shows no data. A failed
+  lookup renders the page's error state, the same as any other failed request.
+- **Resolved once per document, held in a variable.** `localStorage` is banned
+  (see platform constraints), and every page of a multi-page app is a fresh
+  document, so each one resolves for itself — the same way each one re-checks
+  auth.
+- **Await it before building any URL**: `const base = await apiBase();`, then
+  `fetch(base + "/api/services/app/...")`. It is the only request in the page
+  that does not use `workiomHeaders()` — it is anonymous by design, and sending
+  a session token to it would be pointless.
+
+All other calls use `workiomHeaders()`. Paths below are relative to the
+resolved base.
 
 **`X-Api-Key` must never appear in a generated page.** Workiom's API guide documents it for server-to-server use; it is a tenant-wide credential and putting it in a page exposes it to anyone who opens devtools. The page uses the viewer's session instead.
 
@@ -363,7 +430,7 @@ async function uploadFile(file) {
   const body = new FormData();
   body.append("files", file);
 
-  const res = await fetch("https://api.workiom.com/File/Upload", {   // NOT /api/services/app/File/Upload
+  const res = await fetch(`${await apiBase()}/File/Upload`, {   // NOT /api/services/app/File/Upload
     method: "POST", headers, body
   });
   const json = await res.json().catch(() => null);
@@ -413,7 +480,7 @@ Fetch `userId` once per session (not per upload) via `GET /api/services/app/Sess
 }
 ```
 
-Always an array, even for one file. **Never point an `<img src>` or `<a href>` directly at `api.workiom.com`** — the CSP's `img-src` stays at the default `'none'` (only `connect-src` allows `api.workiom.com`, so a direct `<img>` is silently blocked before it hits the network, zero bytes transferred), and a plain link-click download can't be relied on to carry the session cookie across the navigation. `FileUrl`/`ThumbnailUrl` on the object above are always minted `inline` and are not download links either way.
+Always an array, even for one file. **Never point an `<img src>` or `<a href>` directly at the API host** — the CSP's `img-src` stays at the default `'none'` (only `connect-src` allows Workiom's API hosts, so a direct `<img>` is silently blocked before it hits the network, zero bytes transferred), and a plain link-click download can't be relied on to carry the session cookie across the navigation. `FileUrl`/`ThumbnailUrl` on the object above are always minted `inline` and are not download links either way.
 
 **Use `_id`, not `FileToken`, for every download/thumbnail call — this is the single most common way file read-back breaks.** `DownloadFile`, `DownloadThumbnail`, and `GeneratePublicDownloadUrl` all resolve the file server-side via a lookup keyed on the file's Mongo document id — despite parameter names like `id`/`fileToken` suggesting otherwise. `_id` and `FileToken` are **different values** once a file has gone through a record write (only `FileToken` survives from the original `Upload` response into the write payload; `_id` is assigned server-side when the record's File field value is persisted). Passing `FileToken` gets back a clean, misleading `"File not found!"` — not a network or auth error, so it's easy to mistake for something else being wrong.
 
@@ -427,7 +494,7 @@ async function fetchFileBlob(file, { thumbnail = false } = {}) {
 
   const id = file._id || file.FileToken;   // _id first — see above
   const action = thumbnail ? "DownloadThumbnail" : "DownloadFile";
-  const res = await fetch(`https://api.workiom.com/File/${action}?id=${encodeURIComponent(id)}&preview=false`, { headers });   // no /api/services/app prefix
+  const res = await fetch(`${await apiBase()}/File/${action}?id=${encodeURIComponent(id)}&preview=false`, { headers });   // no /api/services/app prefix
   if (res.status === 401) { redirectToLogin(); return null; }
   if (!res.ok) throw new Error(`${action} failed (${res.status})`);
 
@@ -445,7 +512,7 @@ async function downloadFile(file, fileName) {
   const headers = workiomHeaders();
   if (!headers) { redirectToLogin(); return; }
 
-  const res = await fetch(`https://api.workiom.com/api/services/app/File/GeneratePublicDownloadUrl/${encodeURIComponent(id)}?forceDownload=true`, { headers });
+  const res = await fetch(`${await apiBase()}/api/services/app/File/GeneratePublicDownloadUrl/${encodeURIComponent(id)}?forceDownload=true`, { headers });
   if (res.status === 401) { redirectToLogin(); return; }
   const data = await res.json().catch(() => null);
   if (!res.ok || data?.success === false) throw new Error(data?.error?.message || `HTTP ${res.status}`);
@@ -646,7 +713,11 @@ API — never the user's real tenant data.
    faking navigation would misrepresent how the real app behaves. Never show
    a multi-page preview without saying which of the two you did.
 2. **Stub the network.** Replace calls to the endpoints in "Calling the API"
-   above with a small fetch-intercepting shim. Generate sample records
+   above with a small fetch-intercepting shim. **Stub `apiBase()` too** — it
+   is a real request to `api.workiom.com`, which the Artifact's CSP blocks, so
+   an unstubbed one leaves every `await apiBase()` pending forever and the
+   preview renders empty with no error. Have it resolve to any placeholder
+   string; nothing in the preview dereferences it. Generate sample records
    shaped by `<app_schema>` — cycle through each `StaticSelect`/`Status`
    field's real discovered option labels, plausible dummy values for other
    types — enough rows to populate list/browse views. Simulate

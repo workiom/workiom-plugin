@@ -1,6 +1,6 @@
 {
   "name": "workiom-plugin",
-  "version": "1.1.0",
+  "version": "1.2.1",
   "description": "Build and publish Workiom vibe apps — self-contained pages that run inside a Workiom workspace and read and write its lists using the viewer's own session.",
   "author": {
     "name": "Workiom",
