@@ -106,7 +106,8 @@ get_apps                                → find the app (ask if ambiguous)
 find_list_by_name(appId, listName)      → list UUID (on miss it returns
                                           availableLists — offer those)
 get_list_info(listId)                   → fields: id, name, dataType,
-                                          isRequired, isSystemField,
+                                          isRequired, isPrimaryRecordName,
+                                          isSystemField,
                                           isComputed, isReadOnly,
                                           staticListValues
 ```
@@ -146,6 +147,10 @@ abstractions.
    lookups/rollups, workflow fields (Status, Assignee, Sprint, approvals —
    server-defaulted or team-managed), and Linked List fields unless the user
    explicitly needs them and understands they take arrays of record IDs.
+   **Exception: a required field (see `required` under the schema block
+   below) stays on every create form** unless it has a `defaultValue` the
+   server fills in. If the user still wants it out, tell them every submit
+   will be rejected with "<field> is required" — don't drop it silently.
 2. **Operations** — create-only, or also browse/edit/search/delete-one?
 3. For each `StaticSelect`/`Status`/`MultiStaticSelect` field: which of the
    discovered options are relevant, or offer all of them?
@@ -176,13 +181,28 @@ Once answered, build the schema block Step 4 generates against:
   <tenant subdomain="..." />
   <app id="..." name="..." />
   <list id="<uuid>" name="...">
-    <field id="<int>" name="..." type="Text|LongText|Number|Date|DateTime|StaticSelect|MultiStaticSelect|Status|Email|Phone|URL|User|People|File" required="true|false">
+    <field id="<int>" name="..." type="Text|LongText|Number|Date|DateTime|StaticSelect|MultiStaticSelect|Status|Email|Phone|URL|User|People|File" required="true|false" default="verbatim label">
       <option>verbatim label</option>   <!-- StaticSelect/Status only -->
     </field>
   </list>
   <!-- more <list> elements for multi-list apps -->
 </app_schema>
 ```
+
+**`required` comes from discovery, never from judgement.** Set
+`required="true"` when `get_list_info` returned `isRequired: true`, or when
+`isPrimaryRecordName: true` and the field is not `isReadOnly` — the server
+rejects a record with an empty primary field too. Everything else is
+`required="false"`. Don't mark a field required because it "seems important",
+and don't relax one the list marks required.
+
+**`default` comes from discovery too.** For `StaticSelect`, `Status` and
+`MultiStaticSelect` fields, copy `get_list_info`'s `defaultValue`
+character-for-character. A single-select default is one option label (e.g.
+`"Medium"`). A multi-select default is a JSON array of labels (e.g.
+`'["Web","Mobile"]'`). Keep it only if every label matches one of the
+field's discovered options exactly; drop a default that names an option the
+list no longer has. Omit `default` when `defaultValue` is empty or missing.
 
 ---
 
@@ -390,7 +410,7 @@ resolved base.
 | Operation | Call |
 |---|---|
 | Read records | `POST /api/services/app/Data/All` body `{listId, maxResultCount, skipCount}` → `result.items[]`, `result.totalCount` |
-| Create | `POST /api/services/app/Data/Create?listId={listId}` body flat `{"<fieldId>": value}` → `result.id` |
+| Create | `POST /api/services/app/Data/Create?listId={listId}` body flat `{"<fieldId>": value}` → `result.id`. **Leave out every field the viewer left empty** — never send `""`, `null` or `[]` on create (see "Default values") |
 | Update | `PUT /api/services/app/Data/UpdatePartial?listId={listId}&id={recordId}` body only changed fields; `null` clears |
 | Delete one | `DELETE /api/services/app/Data/Delete?listId={listId}&id={recordId}` |
 | Comment | `POST /api/services/app/AdvancedComment/Comment?commentAsPlainText=true` body `{listId, recordId, comment}` |
@@ -552,12 +572,113 @@ Surface `error.message` — it's human-readable ("Summary field is required").
 
 **Field discipline:** only ids from the `<app_schema>` block; never invent one, never guess at fields that "probably exist". Ids are per-list — in multi-list apps keep each payload to its own list's ids.
 
+### Required fields — marked and enforced, no exceptions
+
+Every field the `<app_schema>` marks `required="true"` that appears on a
+create or edit form gets **all three** of the following. A required field
+missing any one of them is a bug, the same as a wrong field id.
+
+1. **A red asterisk after the label text**, plus one "Required" legend at
+   the top of the form:
+
+   ```html
+   <p class="req-note"><span class="req" aria-hidden="true">*</span> Required</p>
+
+   <label for="f-1234">Summary<span class="req" aria-hidden="true">*</span></label>
+   <input id="f-1234" name="1234" required aria-required="true">
+   ```
+
+   ```css
+   .req { color: #d92d20; font-weight: 600; margin-inline-start: 2px; }
+   .req-note { font-size: .875em; }
+   ```
+
+   The asterisk stays red in every theme — on dark backgrounds use a lighter
+   red such as `#f97066` so it keeps contrast. `margin-inline-start` keeps it
+   on the correct side in RTL. For a checkbox or radio group, the asterisk
+   goes in the `<legend>` of its `<fieldset>`.
+
+2. **`required` and `aria-required="true"` on the control itself** — the
+   `<input>`, `<select>` or `<textarea>`. For custom controls (tag inputs,
+   user pickers, checkbox groups) that can't take `required`, put
+   `aria-required="true"` on the group and rely on step 3.
+
+3. **A JavaScript check before the request is sent.** Browser `required`
+   doesn't cover custom controls or whitespace-only text, so check the
+   payload itself:
+
+   ```js
+   function isEmptyValue(v) {
+     return v == null
+       || (typeof v === "string" && v.trim() === "")
+       || (Array.isArray(v) && v.length === 0);
+   }
+
+   // requiredFields: [{ id, name }] taken from <app_schema>, never hand-picked
+   function missingRequired(requiredFields, payload) {
+     return requiredFields.filter(f => isEmptyValue(payload[String(f.id)]));
+   }
+   ```
+
+   If anything is missing, send nothing. List the missing field names in a
+   visible error element, set `aria-invalid="true"` on each offending
+   control, and focus the first one. Never use `alert()`.
+
+**Only required fields get the asterisk.** An optional field never carries
+one, and read-only or browse views show none. On an edit form a required
+field keeps its asterisk. Run the check against the form's current values,
+not the `UpdatePartial` payload — that payload carries only changed fields,
+so untouched required fields would look missing. Don't leave the check to the server — its "is required" error comes
+back only after the viewer has already pressed submit.
+
+### Default values — pre-filled on create forms
+
+A Static List, Status or Multi Static List field with a `default` in
+`<app_schema>` starts with that value selected on every **create** form,
+exactly as it does in Workiom:
+
+```html
+<select id="f-3416131" name="3416131">
+  <option value="">Select…</option>
+  <option value="Critical">Critical</option>
+  <option value="High">High</option>
+  <option value="Medium" selected>Medium</option>
+  <option value="Low">Low</option>
+</select>
+```
+
+- **Single select or Status:** mark the default option `selected`. In a
+  segmented control or radio group, check it.
+- **Multi select:** check every label in the default array.
+- **Create forms only.** An edit form shows the record's stored value, even
+  when it's empty. Never overwrite it with the default.
+- **The viewer can still change or clear it.** A default is a starting
+  value, not a lock. The "Select…" option stays available, unless the field
+  is required.
+
+**Leave empty fields out of the create request.** The server fills in a
+field's default only when the field is missing from the request. If the app
+sends `""`, `null` or `[]` for a field the viewer left empty, the server
+skips the default and then drops the empty value, so the record is saved
+with nothing. Build the create payload from filled-in fields only:
+
+```js
+const payload = {};
+for (const [fieldId, value] of Object.entries(formValues)) {
+  if (!isEmptyValue(value)) payload[fieldId] = value;   // isEmptyValue: see "Required fields"
+}
+```
+
+This also keeps defaults working for fields that aren't on the form at all
+(e.g. a Status the app leaves to the server). Updates are different:
+`UpdatePartial` sends `null` on purpose to clear a field.
+
 ### Code quality
 
 - `textContent` for every user-supplied or API-returned string. **Never
   `innerHTML` with interpolated data.** Mixed formatting → `createElement`.
 - Submit buttons disabled while in flight, re-enabled in `finally`.
-- Client-side validation of `required` fields; focus the first offender;
+- Required fields follow "Required fields — marked and enforced" above;
   errors in a visible page element, never `alert()`.
 - Loading, empty, and error states for everything asynchronous.
 - Semantic elements, labelled inputs, adequate contrast; usable at 360 px.
@@ -673,6 +794,13 @@ python3 scripts/vibe-pack.py ./<appId>/ --json
 This is the only place the content rules are enforced — the backend checks
 structure and size, not `innerHTML` or external resources. Skipping it ships an
 unsafe page.
+
+**Then check required fields by hand — the script can't.** For every form,
+compare against `<app_schema>`. Every `required="true"` field on the form
+needs its red asterisk, `required`/`aria-required`, and an entry in the JS
+check. No `required="false"` field has an asterisk. Every field with a
+`default` starts with that option selected on its create form, and the
+create request leaves out empty fields. Fix any mismatch before Step 6.
 
 ---
 
