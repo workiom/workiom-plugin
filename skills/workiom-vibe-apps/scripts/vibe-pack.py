@@ -10,7 +10,7 @@ Usage:
 Exit 0 = valid (zip written if input was a folder). Exit 1 = violations listed.
 
 --json prints the bundle as {"path": "content"} on stdout, ready to hand to the
-create_vibe_app / add_vibe_version MCP tools. Nothing is written to disk and no
+create_interface / add_interface_version MCP tools. Nothing is written to disk and no
 zip is made: the tools take the files themselves, and round-tripping a binary
 through a tool call would cost context for nothing. Diagnostics go to stderr so
 stdout stays parseable.

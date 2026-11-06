@@ -26,18 +26,18 @@ MCP.
 The pipeline is strict and ordered. Do not skip or reorder steps.
 
 ```
-0. Gate       get_vibe_apps — connected AND beta enabled?         (hard stop if not)
+0. Gate       get_interfaces — connected AND beta enabled?         (hard stop if not)
 1. Require    light intake: purpose, which list(s), audience
 2. Discover   MCP: app → list(s) → fields   (live schema, never memory)
 3. Confirm    ~10 schema-grounded content + style questions
 4. Generate   system rules below + <app_schema> → files (html/css/js/json, 1+ pages)
 5. Validate   python3 scripts/vibe-pack.py <folder> --json  → files map
 6. Preview    Artifact side-panel preview vs. mock data, iterate    (when available)
-7. Publish    MCP: create_vibe_app / add_vibe_version       → live URL
+7. Publish    MCP: create_interface / add_interface_version       → live URL
 ```
 
 **Changing an app that already exists starts differently.** Fetch its real
-source with `get_vibe_app_files(appId)` and edit that, rather than generating a
+source with `get_interface_files(interfaceId)` and edit that, rather than generating a
 replacement — see "Editing an app you didn't build in this session". Steps 2
 and 5 to 7 still apply; steps 3 and 4 shrink to the change being asked for.
 
@@ -45,14 +45,19 @@ and 5 to 7 still apply; steps 3 and 4 shrink to the change being asked for.
 
 ## Step 0 — Gate: verify Workiom access FIRST
 
-Before any discovery or generation, call the Workiom MCP tool `get_vibe_apps`.
+Before any discovery or generation, call the Workiom MCP tool `get_interfaces`.
 
-**`get_vibe_apps`, not `get_apps`.** Both are cheap reads, but only
-`get_vibe_apps` passes through the vibe feature gate. A workspace without the
+**`get_interfaces`, not `get_apps`.** Both are cheap reads, but only
+`get_interfaces` passes through the interfaces feature gate. A workspace without the
 beta answers `get_apps` perfectly happily, so gating on it would let a session
 discover, confirm, generate, validate and preview an entire app before hitting
 the wall at publish. It also returns the apps that already exist, which is what
 tells you whether this request is a new app or an edit of one.
+
+The answer is `{ items, hasMore }`: each item has `id`, `name`, `status`,
+`url` and `liveVersion`. The list is paged; when `hasMore` is true the message
+says which offset to pass next, so keep paging before concluding an app does
+not exist.
 
 **If the tool is unavailable or the call errors:**
 
@@ -748,15 +753,15 @@ first:
 
 ```
 (Step 0 already listed them)       → find it there
-get_vibe_app_files(appId)          → the live version's files, as a files map
+get_interface_files(interfaceId)          → the live version's files, as a files map
    edit the files                  → keep everything not being changed
-add_vibe_version(appId, ...)       → publish the edit
+add_interface_version(interfaceId, ...)       → publish the edit
 ```
 
 Step 2's schema discovery still runs — the fetched source tells you what the
 app does, never what the list currently contains.
 
-If `get_vibe_app_files` reports no stored bundle, the app predates bundle
+If `get_interface_files` reports no stored bundle, the app predates bundle
 archiving and its source cannot be recovered. Say so before rebuilding, and
 confirm the user accepts losing whatever the original had.
 
@@ -780,7 +785,7 @@ Write the files to a folder named after the app id
 `_health`, `admin`), then:
 
 ```bash
-python3 scripts/vibe-pack.py ./<appId>/ --json
+python3 scripts/vibe-pack.py ./<interfaceId>/ --json
 ```
 
 - **Exit 0** → the files map is on stdout, ready for Step 7. Diagnostics go to
@@ -879,13 +884,13 @@ tools take the files themselves.
 **New app:**
 
 ```
-create_vibe_app(appId, name, icon, color, description, files)
+create_interface(interfaceId, name, icon, color, description, files)
 ```
 
-**Updating an app that already exists** — check with `get_vibe_apps` first:
+**Updating an app that already exists** — check with `get_interfaces` first:
 
 ```
-add_vibe_version(appId, versionName, files)
+add_interface_version(interfaceId, versionName, files)
 ```
 
 Both publish immediately by default and return the version that went live.
@@ -897,13 +902,14 @@ opens for any logged-in user in that workspace.
 
 Other operations, when asked:
 
-- `get_vibe_app(appId)` — version history and which version is currently live
-- `get_vibe_app_files(appId, version?)` — read a version's source back as a
+- `get_interface(interfaceId)` — the interface's `liveVersion`, plus (for owners) `latestVersion` and
+  `versions` with `createdAt`/`createdBy`
+- `get_interface_files(interfaceId, version?)` — read a version's source back as a
   files map, defaulting to the live one
-- `publish_vibe_version(appId, version)` — **roll back** by publishing an
+- `publish_interface_version(interfaceId, version)` — **roll back** by publishing an
   older version number; the files are already stored, so this is instant and
   cannot leave the app broken
-- `update_vibe_app(appId, ...)` — change the app's name, icon, colour or
+- `update_interface(interfaceId, ...)` — change the app's name, icon, colour or
   description. Partial: omitted fields keep their current value. This is
   listing metadata only; it cannot change the page's design, which takes a new
   version.
