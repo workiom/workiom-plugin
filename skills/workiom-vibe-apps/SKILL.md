@@ -26,14 +26,14 @@ MCP.
 The pipeline is strict and ordered. Do not skip or reorder steps.
 
 ```
-0. Gate       get_interfaces — connected AND beta enabled?         (hard stop if not)
+0. Gate       get_interfaces — connected AND beta enabled?        (hard stop if not)
 1. Require    light intake: purpose, which list(s), audience
 2. Discover   MCP: app → list(s) → fields   (live schema, never memory)
 3. Confirm    ~10 schema-grounded content + style questions
 4. Generate   system rules below + <app_schema> → files (html/css/js/json, 1+ pages)
 5. Validate   python3 scripts/vibe-pack.py <folder> --json  → files map
 6. Preview    Artifact side-panel preview vs. mock data, iterate    (when available)
-7. Publish    MCP: create_interface / add_interface_version       → live URL
+7. Publish    MCP: create_interface / add_interface_version → live URL
 ```
 
 **Changing an app that already exists starts differently.** Fetch its real
@@ -752,10 +752,10 @@ silently discards every customisation you can't see. Pull the real source
 first:
 
 ```
-(Step 0 already listed them)       → find it there
-get_interface_files(interfaceId)          → the live version's files, as a files map
-   edit the files                  → keep everything not being changed
-add_interface_version(interfaceId, ...)       → publish the edit
+(Step 0 already listed them)            → find it there
+get_interface_files(interfaceId)        → the live version's files, as a files map
+   edit the files                       → keep everything not being changed
+add_interface_version(interfaceId, ...) → publish the edit
 ```
 
 Step 2's schema discovery still runs — the fetched source tells you what the
@@ -896,6 +896,12 @@ add_interface_version(interfaceId, versionName, files)
 Both publish immediately by default and return the version that went live.
 Pass `publish: false` only when the user explicitly wants a draft they will
 review before it goes live.
+
+Check `published` in the answer. If the upload worked but publishing did not
+(`published: false` with a `publishError`), the files are already saved: do
+not upload them again or create the interface again. Call
+`publish_interface_version(interfaceId, version)` with the version the answer
+gives, and tell the user what failed if that fails too.
 
 Then tell the user where it is: `{tenant}.workiom.com/vibe/{appId}/`, which
 opens for any logged-in user in that workspace.
