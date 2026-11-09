@@ -94,6 +94,9 @@ real schema is known; don't front-load it here.
 3. **Who uses it?** Always logged-in tenant users (the platform enforces the
    session); the useful question is which team and what they should see.
 
+If the app shows the viewer's notifications, that part needs no list: it uses
+the notifications helper in Step 4.
+
 If the user can't name the list, show them candidates from `get_apps` /
 `get_lists` and let them choose. Do not guess.
 
@@ -173,6 +176,9 @@ abstractions.
    to the app's subject" below) unless they already have a direction.
 9. **Language** — English, Arabic (RTL), or bilingual.
 10. **Feedback** — confirmation behaviour, error handling, empty states.
+11. **Notifications**, only when the app shows them: inbox only, or inbox and
+    archive? Which actions — mark read, mark all read, archive, un-archive?
+    (There is no mark unread.) Where does the bell sit?
 
 Once answered, build the schema block Step 4 generates against:
 
@@ -730,6 +736,37 @@ const workiomNotifications = (() => {
 })();
 ```
 <!-- vibe-notifications-helper:end -->
+
+What it returns:
+
+| Call | Result |
+|---|---|
+| `list({ state, archived, limit })` | `{ items, unreadCount, hasMore, next }`. `state`: `"any"` (default), `"read"`, `"unread"`. `archived`: `false` (default, the inbox) or `true` (the archive); the two combine. `limit`: 1–100, default 20. Newest first. Load the next page with `list(page.next)`; `next` is `null` on the last page. Never build `next` by hand. |
+| `unreadCount()` | Unread notifications in the inbox: the number for the badge. Stops counting at 1000, so show `1000` as "1000+". |
+| `markRead(ids)` / `archive(ids)` / `unarchive(ids)` | `{ succeeded, failed: [{ id, reason }] }`. `ids` is one id or an array of 1–50. A bad id throws before anything is sent. |
+| `markAllRead()` | Marks every notification read. |
+
+Each item:
+
+```js
+{ id, type, severity, message, createdAt, isRead, isArchived,
+  sender: { userId, name } | null,
+  record: { appId, listId, recordId, title, url } | null,
+  data }
+```
+
+- `message` is already in the viewer's language. Show it with `textContent`, never `innerHTML`.
+- Open a notification with `location.assign(item.record.url)`. The helper builds that URL on the page's own origin; don't build record URLs yourself. If `record` is `null`, the notification has nothing to open.
+- `data` is the raw payload, for a type the fields above don't cover.
+
+Rules:
+
+- **There is no "mark unread".** Workiom has no way to set a notification back to unread. Don't offer it, and don't fake it in page state.
+- **The inbox and the archive are separate lists,** as in Workiom's notification centre. There is no single "everything" list.
+- **`succeeded` means Workiom accepted the change, not that the id existed.** An unknown id is accepted and changes nothing.
+- **Refresh when the panel opens and after every action.** Re-fetch both the list and `unreadCount()`. Don't poll on a timer, and don't keep a local copy that drifts from Workiom.
+- Changes show in Workiom's own notification centre: read and archive changes live, mark-all-read after a reload.
+- Never call any other `Notification` endpoint from a page. In particular, `SetAllAsArchived` with no ids archives **every** notification the viewer has.
 
 ### Required fields — marked and enforced, no exceptions
 
