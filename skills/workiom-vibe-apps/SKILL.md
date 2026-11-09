@@ -641,7 +641,7 @@ const workiomNotifications = (() => {
     return {
       appId, listId, recordId,
       title: pick(data, ["recordTitle", "RecordTitle"]),
-      url: location.origin + "/app/apps/" + appId + "/list/" + listId + "/record/" + recordId
+      url: location.origin + "/app/apps/" + appId + "/list/" + listId + "/record/" + encodeURIComponent(recordId)
     };
   }
 
@@ -741,9 +741,9 @@ What it returns:
 
 | Call | Result |
 |---|---|
-| `list({ state, archived, limit })` | `{ items, unreadCount, hasMore, next }`. `state`: `"any"` (default), `"read"`, `"unread"`. `archived`: `false` (default, the inbox) or `true` (the archive); the two combine. `limit`: 1–100, default 20. Newest first. Load the next page with `list(page.next)`; `next` is `null` on the last page. Never build `next` by hand. |
+| `list({ state, archived, limit })` | `{ items, unreadCount, hasMore, next }`. `state`: `"any"` (default), `"read"`, `"unread"`. `archived`: `false` (default, the inbox) or `true` (the archive); the two combine. `limit`: 1–100, default 20. Newest first. Load the next page with `list(page.next)`; `next` is `null` on the last page. Never build `next` by hand. `unreadCount` here counts unread items in the listed tab only; for the badge use `unreadCount()`. |
 | `unreadCount()` | Unread notifications in the inbox: the number for the badge. Stops counting at 1000, so show `1000` as "1000+". |
-| `markRead(ids)` / `archive(ids)` / `unarchive(ids)` | `{ succeeded, failed: [{ id, reason }] }`. `ids` is one id or an array of 1–50. A bad id throws before anything is sent. |
+| `markRead(ids)` / `archive(ids)` / `unarchive(ids)` | `{ succeeded, failed: [{ id, reason }] }`. `ids` is one id or an array of 1–50. A bad id throws before anything is sent. Acting on a page of more than 50 items: send the ids in chunks of 50. |
 | `markAllRead()` | Marks every notification read. |
 
 Each item:
@@ -755,7 +755,7 @@ Each item:
   data }
 ```
 
-- `message` is already in the viewer's language. Show it with `textContent`, never `innerHTML`.
+- Every string from an item — `message`, `record.title`, `sender.name`, anything in `data` — is text written by people: show it with `textContent`, never `innerHTML`. `message` is already in the viewer's language.
 - Open a notification with `location.assign(item.record.url)`. The helper builds that URL on the page's own origin; don't build record URLs yourself. If `record` is `null`, the notification has nothing to open.
 - `data` is the raw payload, for a type the fields above don't cover.
 
@@ -763,7 +763,9 @@ Rules:
 
 - **There is no "mark unread".** Workiom has no way to set a notification back to unread. Don't offer it, and don't fake it in page state.
 - **The inbox and the archive are separate lists,** as in Workiom's notification centre. There is no single "everything" list.
-- **`succeeded` means Workiom accepted the change, not that the id existed.** An unknown id is accepted and changes nothing.
+- **`succeeded` means Workiom accepted the change, not that the id existed.** An unknown id is accepted and changes nothing. Another user's id is refused by `archive`/`unarchive` (reason "Not found, or not one of your notifications.") and silently ignored by `markRead`.
+- **Failures:** `list`, `unreadCount` and `markAllRead` throw an `Error` whose `.message` is readable (and `.status` on HTTP failures); show it in the app's error state. Per-id actions never throw for one bad id; they report it in `failed`. A malformed id or option throws before anything is sent. Duplicate ids are sent once.
+- **Expired session:** the helper sends the viewer to sign in and its promise never settles. Don't wrap it in a timeout or show an error for it; the page is leaving.
 - **Refresh when the panel opens and after every action.** Re-fetch both the list and `unreadCount()`. Don't poll on a timer, and don't keep a local copy that drifts from Workiom.
 - Changes show in Workiom's own notification centre: read and archive changes live, mark-all-read after a reload.
 - Never call any other `Notification` endpoint from a page. In particular, `SetAllAsArchived` with no ids archives **every** notification the viewer has.
