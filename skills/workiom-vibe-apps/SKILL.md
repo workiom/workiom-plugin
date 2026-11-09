@@ -94,6 +94,9 @@ real schema is known; don't front-load it here.
 3. **Who uses it?** Always logged-in tenant users (the platform enforces the
    session); the useful question is which team and what they should see.
 
+If the app shows the viewer's notifications, that part needs no list: it uses
+the notifications helper in Step 4.
+
 If the user can't name the list, show them candidates from `get_apps` /
 `get_lists` and let them choose. Do not guess.
 
@@ -173,6 +176,9 @@ abstractions.
    to the app's subject" below) unless they already have a direction.
 9. **Language** — English, Arabic (RTL), or bilingual.
 10. **Feedback** — confirmation behaviour, error handling, empty states.
+11. **Notifications**, only when the app shows them: inbox only, or inbox and
+    archive? Which actions — mark read, mark all read, archive, un-archive?
+    (There is no mark unread.) Where does the bell sit?
 
 Once answered, build the schema block Step 4 generates against:
 
@@ -571,6 +577,198 @@ session is not a failure to report to the viewer, and rendering "Request failed
 Surface `error.message` — it's human-readable ("Summary field is required").
 
 **Field discipline:** only ids from the `<app_schema>` block; never invent one, never guess at fields that "probably exist". Ids are per-list — in multi-list apps keep each payload to its own list's ids.
+
+### Notifications — only for apps that show them
+
+A page that shows the viewer's Workiom notifications (a bell, an inbox panel,
+a badge) uses this helper, verbatim. It needs `apiBase()`, `workiomHeaders()`
+and `redirectToLogin()` from the sections above. Leave it out of apps that
+don't show notifications.
+
+<!-- vibe-notifications-helper:start -->
+```js
+const workiomNotifications = (() => {
+  const SERVICE = "/api/services/app/Notification";
+  const MAX_LIMIT = 100;
+  const MAX_IDS = 50;
+  const CONCURRENCY = 5;
+  const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const STATE_TO_ABP = { unread: 0, read: 1 };
+  const SEVERITIES = ["info", "success", "warn", "error", "fatal"];
+  const RECORD_PATH = /\/app\/apps\/([0-9a-f-]{36})\/list\/([0-9a-f-]{36})(?:\/[^/]+)?\/record\/([^/?#]+)/i;
+
+  // The session is gone and the page is on its way to sign-in: never settle, so the
+  // caller renders no error next to the redirect.
+  const leaving = () => new Promise(() => {});
+
+  async function call(method, path, query, body) {
+    const headers = workiomHeaders();
+    if (!headers) { redirectToLogin(); return leaving(); }
+    const qs = query ? "?" + new URLSearchParams(query).toString() : "";
+    const res = await fetch((await apiBase()) + SERVICE + path + qs, {
+      method, headers, body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    const json = await res.json().catch(() => null);
+    if (res.status === 401 || json?.unAuthorizedRequest) { redirectToLogin(); return leaving(); }
+    if (!res.ok || !json || json.success === false) {
+      const err = new Error(json?.error?.message || ("Request failed (" + res.status + ")"));
+      err.status = res.status;
+      throw err;
+    }
+    return json.result;
+  }
+
+  // Notification payloads differ by type; read a property wherever the backend put it.
+  function pick(data, names) {
+    for (const name of names) {
+      const fromProps = data?.properties?.[name];
+      if (fromProps !== undefined && fromProps !== null) return fromProps;
+      const top = data?.[name];
+      if (top !== undefined && top !== null) return top;
+    }
+    return null;
+  }
+
+  function enumName(value, byNumber) {
+    if (typeof value === "string") return value.toLowerCase();
+    return byNumber[value] ?? null;
+  }
+
+  function toRecord(data) {
+    const m = RECORD_PATH.exec(String(pick(data, ["recordUrl", "RecordUrl"]) || ""));
+    if (!m) return null;
+    const [, appId, listId, recordId] = m;
+    return {
+      appId, listId, recordId,
+      title: pick(data, ["recordTitle", "RecordTitle"]),
+      url: location.origin + "/app/apps/" + appId + "/list/" + listId + "/record/" + encodeURIComponent(recordId)
+    };
+  }
+
+  function toItem(raw) {
+    const n = raw.notification || {};
+    const data = n.data || {};
+    const message = pick(data, ["message", "Message"]);
+    const senderId = pick(data, ["notifierUserId"]);
+    const senderName = pick(data, ["notifierName", "notifierUserName"]);
+    return {
+      id: raw.id,
+      type: n.notificationName ?? null,
+      severity: enumName(n.severity, SEVERITIES),
+      message: typeof message === "string" ? message : "",
+      createdAt: n.creationTime ?? null,
+      isRead: enumName(raw.state, { 0: "unread", 1: "read" }) === "read",
+      isArchived: !!raw.isArchived,
+      sender: senderId === null && senderName === null ? null : { userId: senderId, name: senderName },
+      record: toRecord(data),
+      data
+    };
+  }
+
+  async function list(options = {}) {
+    const { state = "any", archived = false, limit = 20, after = null, loaded = 0 } = options;
+    if (state !== "any" && !(state in STATE_TO_ABP))
+      throw new Error('state must be "any", "read" or "unread".');
+    if (typeof archived !== "boolean")
+      throw new Error("archived must be true (the archive) or false (the inbox).");
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT)
+      throw new Error("limit must be a whole number from 1 to " + MAX_LIMIT + ".");
+
+    const query = { IsArchived: String(archived), MaxResultCount: String(limit), SkipCount: String(loaded) };
+    if (state !== "any") query.State = String(STATE_TO_ABP[state]);
+    if (after) query.AfterUserNotificationId = after;
+
+    const result = await call("GET", "/GetUserNotifications", query);
+    const items = (result.items || []).map(toItem);
+    const total = loaded + items.length;
+    const hasMore = items.length > 0 && (!!result.isTotalCountCapped || total < (result.totalCount ?? 0));
+    return {
+      items,
+      unreadCount: result.unreadCount ?? 0,
+      hasMore,
+      next: hasMore ? { state, archived, limit, after: items[items.length - 1].id, loaded: total } : null
+    };
+  }
+
+  async function unreadCount() {
+    const result = await call("GET", "/GetUserNotificationsSummary");
+    return result?.totalUnread ?? 0;
+  }
+
+  function normalizeIds(ids) {
+    const unique = [...new Set(Array.isArray(ids) ? ids : [ids])];
+    if (unique.length === 0) throw new Error("Pass at least one notification id.");
+    if (unique.length > MAX_IDS) throw new Error("Pass at most " + MAX_IDS + " ids per call; got " + unique.length + ".");
+    const bad = unique.find(id => typeof id !== "string" || !GUID.test(id));
+    if (bad !== undefined) throw new Error('"' + bad + '" is not a notification id. Nothing was changed.');
+    return unique;
+  }
+
+  // The backend has no bulk read or un-archive: one call per id, a few at a time.
+  async function eachId(ids, run, reasonFor) {
+    const queue = normalizeIds(ids);
+    const succeeded = [];
+    const failed = [];
+    let next = 0;
+    async function worker() {
+      while (next < queue.length) {
+        const id = queue[next++];
+        try { await run(id); succeeded.push(id); }
+        catch (err) { failed.push({ id, reason: reasonFor(err) }); }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
+    return { succeeded, failed };
+  }
+
+  const plainReason = err => err.message;
+  // SetArchiveStatus fails with a bare 500 for another user's id; an unknown id is a no-op.
+  const archiveReason = err => err.status === 500 ? "Not found, or not one of your notifications." : err.message;
+
+  return Object.freeze({
+    list,
+    unreadCount,
+    markRead: async ids => eachId(ids, id => call("POST", "/SetNotificationAsRead", null, { id }), plainReason),
+    markAllRead: async () => { await call("POST", "/SetAllNotificationsAsRead"); },
+    archive: async ids => eachId(ids, id => call("POST", "/SetArchiveStatus", { isArchived: "true" }, { id }), archiveReason),
+    unarchive: async ids => eachId(ids, id => call("POST", "/SetArchiveStatus", { isArchived: "false" }, { id }), archiveReason)
+  });
+})();
+```
+<!-- vibe-notifications-helper:end -->
+
+What it returns:
+
+| Call | Result |
+|---|---|
+| `list({ state, archived, limit })` | `{ items, unreadCount, hasMore, next }`. `state`: `"any"` (default), `"read"`, `"unread"`. `archived`: `false` (default, the inbox) or `true` (the archive); the two combine. `limit`: 1–100, default 20. Newest first. Load the next page with `list(page.next)`; `next` is `null` on the last page. Never build `next` by hand. `unreadCount` here counts unread items in the listed tab only; for the badge use `unreadCount()`. |
+| `unreadCount()` | Unread notifications in the inbox: the number for the badge. Stops counting at 1000, so show `1000` as "1000+". |
+| `markRead(ids)` / `archive(ids)` / `unarchive(ids)` | `{ succeeded, failed: [{ id, reason }] }`. `ids` is one id or an array of 1–50. A bad id throws before anything is sent. Acting on a page of more than 50 items: send the ids in chunks of 50. |
+| `markAllRead()` | Marks every notification read. |
+
+Each item:
+
+```js
+{ id, type, severity, message, createdAt, isRead, isArchived,
+  sender: { userId, name } | null,
+  record: { appId, listId, recordId, title, url } | null,
+  data }
+```
+
+- Every string from an item — `message`, `record.title`, `sender.name`, anything in `data` — is text written by people: show it with `textContent`, never `innerHTML`. `message` is already in the viewer's language.
+- Open a notification with `location.assign(item.record.url)`. The helper builds that URL on the page's own origin; don't build record URLs yourself. If `record` is `null`, the notification has nothing to open.
+- `data` is the raw payload, for a type the fields above don't cover.
+
+Rules:
+
+- **There is no "mark unread".** Workiom has no way to set a notification back to unread. Don't offer it, and don't fake it in page state.
+- **The inbox and the archive are separate lists,** as in Workiom's notification centre. There is no single "everything" list.
+- **`succeeded` means Workiom accepted the change, not that the id existed.** An unknown id is accepted and changes nothing. Another user's id is refused by `archive`/`unarchive` (reason "Not found, or not one of your notifications.") and silently ignored by `markRead`.
+- **Failures:** `list`, `unreadCount` and `markAllRead` throw an `Error` whose `.message` is readable (and `.status` on HTTP failures); show it in the app's error state. Per-id actions never throw for one bad id; they report it in `failed`. A malformed id or option throws before anything is sent. Duplicate ids are sent once.
+- **Expired session:** the helper sends the viewer to sign in and its promise never settles. Don't wrap it in a timeout or show an error for it; the page is leaving.
+- **Refresh when the panel opens and after every action.** Re-fetch both the list and `unreadCount()`. Don't poll on a timer, and don't keep a local copy that drifts from Workiom.
+- Changes show in Workiom's own notification centre: read and archive changes live, mark-all-read after a reload.
+- Never call any other `Notification` endpoint from a page. In particular, `SetAllAsArchived` with no ids archives **every** notification the viewer has.
 
 ### Required fields — marked and enforced, no exceptions
 
