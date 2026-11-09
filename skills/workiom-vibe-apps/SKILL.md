@@ -572,6 +572,165 @@ Surface `error.message` — it's human-readable ("Summary field is required").
 
 **Field discipline:** only ids from the `<app_schema>` block; never invent one, never guess at fields that "probably exist". Ids are per-list — in multi-list apps keep each payload to its own list's ids.
 
+### Notifications — only for apps that show them
+
+A page that shows the viewer's Workiom notifications (a bell, an inbox panel,
+a badge) uses this helper, verbatim. It needs `apiBase()`, `workiomHeaders()`
+and `redirectToLogin()` from the sections above. Leave it out of apps that
+don't show notifications.
+
+<!-- vibe-notifications-helper:start -->
+```js
+const workiomNotifications = (() => {
+  const SERVICE = "/api/services/app/Notification";
+  const MAX_LIMIT = 100;
+  const MAX_IDS = 50;
+  const CONCURRENCY = 5;
+  const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const STATE_TO_ABP = { unread: 0, read: 1 };
+  const SEVERITIES = ["info", "success", "warn", "error", "fatal"];
+  const RECORD_PATH = /\/app\/apps\/([0-9a-f-]{36})\/list\/([0-9a-f-]{36})(?:\/[^/]+)?\/record\/([^/?#]+)/i;
+
+  // The session is gone and the page is on its way to sign-in: never settle, so the
+  // caller renders no error next to the redirect.
+  const leaving = () => new Promise(() => {});
+
+  async function call(method, path, query, body) {
+    const headers = workiomHeaders();
+    if (!headers) { redirectToLogin(); return leaving(); }
+    const qs = query ? "?" + new URLSearchParams(query).toString() : "";
+    const res = await fetch((await apiBase()) + SERVICE + path + qs, {
+      method, headers, body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    const json = await res.json().catch(() => null);
+    if (res.status === 401 || json?.unAuthorizedRequest) { redirectToLogin(); return leaving(); }
+    if (!res.ok || !json || json.success === false) {
+      const err = new Error(json?.error?.message || ("Request failed (" + res.status + ")"));
+      err.status = res.status;
+      throw err;
+    }
+    return json.result;
+  }
+
+  // Notification payloads differ by type; read a property wherever the backend put it.
+  function pick(data, names) {
+    for (const name of names) {
+      const fromProps = data?.properties?.[name];
+      if (fromProps !== undefined && fromProps !== null) return fromProps;
+      const top = data?.[name];
+      if (top !== undefined && top !== null) return top;
+    }
+    return null;
+  }
+
+  function enumName(value, byNumber) {
+    if (typeof value === "string") return value.toLowerCase();
+    return byNumber[value] ?? null;
+  }
+
+  function toRecord(data) {
+    const m = RECORD_PATH.exec(String(pick(data, ["recordUrl", "RecordUrl"]) || ""));
+    if (!m) return null;
+    const [, appId, listId, recordId] = m;
+    return {
+      appId, listId, recordId,
+      title: pick(data, ["recordTitle", "RecordTitle"]),
+      url: location.origin + "/app/apps/" + appId + "/list/" + listId + "/record/" + recordId
+    };
+  }
+
+  function toItem(raw) {
+    const n = raw.notification || {};
+    const data = n.data || {};
+    const message = pick(data, ["message", "Message"]);
+    const senderId = pick(data, ["notifierUserId"]);
+    const senderName = pick(data, ["notifierName", "notifierUserName"]);
+    return {
+      id: raw.id,
+      type: n.notificationName ?? null,
+      severity: enumName(n.severity, SEVERITIES),
+      message: typeof message === "string" ? message : "",
+      createdAt: n.creationTime ?? null,
+      isRead: enumName(raw.state, { 0: "unread", 1: "read" }) === "read",
+      isArchived: !!raw.isArchived,
+      sender: senderId === null && senderName === null ? null : { userId: senderId, name: senderName },
+      record: toRecord(data),
+      data
+    };
+  }
+
+  async function list(options = {}) {
+    const { state = "any", archived = false, limit = 20, after = null, loaded = 0 } = options;
+    if (state !== "any" && !(state in STATE_TO_ABP))
+      throw new Error('state must be "any", "read" or "unread".');
+    if (typeof archived !== "boolean")
+      throw new Error("archived must be true (the archive) or false (the inbox).");
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT)
+      throw new Error("limit must be a whole number from 1 to " + MAX_LIMIT + ".");
+
+    const query = { IsArchived: String(archived), MaxResultCount: String(limit), SkipCount: String(loaded) };
+    if (state !== "any") query.State = String(STATE_TO_ABP[state]);
+    if (after) query.AfterUserNotificationId = after;
+
+    const result = await call("GET", "/GetUserNotifications", query);
+    const items = (result.items || []).map(toItem);
+    const total = loaded + items.length;
+    const hasMore = items.length > 0 && (!!result.isTotalCountCapped || total < (result.totalCount ?? 0));
+    return {
+      items,
+      unreadCount: result.unreadCount ?? 0,
+      hasMore,
+      next: hasMore ? { state, archived, limit, after: items[items.length - 1].id, loaded: total } : null
+    };
+  }
+
+  async function unreadCount() {
+    const result = await call("GET", "/GetUserNotificationsSummary");
+    return result?.totalUnread ?? 0;
+  }
+
+  function normalizeIds(ids) {
+    const unique = [...new Set(Array.isArray(ids) ? ids : [ids])];
+    if (unique.length === 0) throw new Error("Pass at least one notification id.");
+    if (unique.length > MAX_IDS) throw new Error("Pass at most " + MAX_IDS + " ids per call; got " + unique.length + ".");
+    const bad = unique.find(id => typeof id !== "string" || !GUID.test(id));
+    if (bad !== undefined) throw new Error('"' + bad + '" is not a notification id. Nothing was changed.');
+    return unique;
+  }
+
+  // The backend has no bulk read or un-archive: one call per id, a few at a time.
+  async function eachId(ids, run, reasonFor) {
+    const queue = normalizeIds(ids);
+    const succeeded = [];
+    const failed = [];
+    let next = 0;
+    async function worker() {
+      while (next < queue.length) {
+        const id = queue[next++];
+        try { await run(id); succeeded.push(id); }
+        catch (err) { failed.push({ id, reason: reasonFor(err) }); }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
+    return { succeeded, failed };
+  }
+
+  const plainReason = err => err.message;
+  // SetArchiveStatus fails with a bare 500 for another user's id; an unknown id is a no-op.
+  const archiveReason = err => err.status === 500 ? "Not found, or not one of your notifications." : err.message;
+
+  return Object.freeze({
+    list,
+    unreadCount,
+    markRead: async ids => eachId(ids, id => call("POST", "/SetNotificationAsRead", null, { id }), plainReason),
+    markAllRead: async () => { await call("POST", "/SetAllNotificationsAsRead"); },
+    archive: async ids => eachId(ids, id => call("POST", "/SetArchiveStatus", { isArchived: "true" }, { id }), archiveReason),
+    unarchive: async ids => eachId(ids, id => call("POST", "/SetArchiveStatus", { isArchived: "false" }, { id }), archiveReason)
+  });
+})();
+```
+<!-- vibe-notifications-helper:end -->
+
 ### Required fields — marked and enforced, no exceptions
 
 Every field the `<app_schema>` marks `required="true"` that appears on a
